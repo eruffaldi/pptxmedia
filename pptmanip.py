@@ -52,12 +52,13 @@ def path2urlfile(x):
 class Media:
 	def __init__(self,target,size=0,crc32=0):
 		if target.startswith("file://"):
-			self.extpath = urlfile2path(name) # path as url
+			self.extpath = urlfile2path(target) # path as url
 		elif target.startswith("http://") or target.startswith("https://"):
 			raise Exception("Unsupported http target")
 		else:
 			self.extpath = None # no specified for others
 		# TODO http case (?)
+		self.name = target
 		self.target = target # full file in PPTX, if any
 		self.crc32 = crc32 
 		self.size = size
@@ -110,9 +111,7 @@ def scanppt(filename,slide=None):
 	slides = []
 	medias = []
 	zf = zipfile.ZipFile(filename,"r")
-	nl = set(zf.namelist())
-
-	medias = [Media(x,crc32=x.CRC,size=x.file_size) for x in zf.namelist() if x.startswith("ppt/media/")]
+	medias = [Media(x.filename,crc32=x.CRC,size=x.file_size) for x in zf.infolist() if x.filename.startswith("ppt/media/")]
 	medias = dict([(m.name,m) for m in medias])
 
 	xslides = [x for x in zf.namelist() if x.startswith("ppt/slides/_rels/")]
@@ -159,8 +158,8 @@ def scanppt(filename,slide=None):
 def zipensuretmp(target=None):
 	if target is None:
 		target = "zipmanip_tmp"
-	if os.path.isfile(target):
-		shutil.rmdir(target)
+	if os.path.isdir(target):
+		shutil.rmtree(target)
 	os.mkdir(target)
 	return target
 
@@ -174,12 +173,12 @@ def zipextract(name,files,targetfiles,etarget):
 		fin = os.path.join(target,os.path.files[i])
 		shutil.move(fin,fext)
 
-def zipadd(name,extfile,infile,target):
+def zipadd(name,extfiles,infiles):
 	# based on ZipFile because we need just to add it by appending
-	zf = zipfile.ZipFile(filename,"a")
-	for i in range(0,len(extfile)):
-		fext = extfile[i]
-		fin = infile[i]
+	zf = zipfile.ZipFile(name,"a")
+	for i in range(0,len(extfiles)):
+		fext = extfiles[i]
+		fin = infiles[i]
 		zf.write(fext,fin,zipfile.ZIP_STORED)
 	zf.close()
 
@@ -191,9 +190,14 @@ def zipupdateslides(name,slides):
 	# could be implemented by first removing the files using "zip" and then appending them again using Python
 	target = zipensuretmp()
 	for s in slides:
-		open(os.path.join(target,s.name),"wb").write(s.root.tostring())
-
-	subprocess.check_output(["zip","-u","-m",name,target+"/*"])
+		sd = os.path.join(target,os.path.split(s.name)[0])
+		if not os.path.isdir(sd):
+			os.makedirs(sd)
+		open(os.path.join(target,s.name),"wb").write(ET.tostring(s.root))
+	
+	a = os.chdir(target)
+	subprocess.check_output(["zip","-u","-m",os.path.abspath(name),"."])
+	os.chdir(a)
 
 def findmediaentry(medias,ext):
 	for i in range(1,1000000):
@@ -231,14 +235,19 @@ if __name__ == "__main__":
 		xnoe = os.path.splitext(x)[0]
 		slides,medias = scanppt(x,slide=args.slide)
 
+		print "**Slides"
 		for s in slides:
 			if len(s.uses) == 0:
 				continue
-			print "slide",s.name
+			print "slide",s.name.split("/")[-1].replace(".xml.rels","")
 			for u in s.uses:
-				print "- uses",u.media.target,u.node
-		for m in medias.values():
-			print "media",m.target," with ",len(m.uses),"uses"
+				if u.media.target != "NULL":
+					print "\tuses",u.media.target
+		if len(medias) > 0:
+			print "**Medias"
+			for m in medias.values():
+				if m.target != "NULL":
+					print "media (used %d) %s" % (len(m.uses),m.target)
 
 		if args.extract or args.collect:
 			toextract = []
@@ -278,9 +287,16 @@ if __name__ == "__main__":
 			for m in medias.values():
 				if m.isExternal:
 					ext = os.path.splitext(m.extpath)[1]
+					extpath = m.extpath
 					me = findmediaentry(medias,ext)
-					print "plan to add",m.extpath,"as",me
-					toaddext.append(m.extpath)
+					print "plan to add",extpath,"as",me
+					if not os.path.isfile(extpath):
+						extpath = extpath.split("/")[-1].split("\\")[-1]
+						print "\tfile missing remapped input as",extpath
+					if not os.path.isfile(extpath):
+						print "ERROR: file missing anyway",extpath
+						continue
+					toaddext.append(extpath)
 					toaddin.append(me)
 					m.setInternal(me)
 			# TODO: optimize by one single add and update
@@ -312,12 +328,12 @@ if __name__ == "__main__":
 					else:
 						print "skip",m.extpath
 			zipupdateslides(x,slides)
-		elif len(args.rename) == 2:
+		elif args.rename is not None and len(args.rename) == 2:
 			ap0 = os.path.abspath(args.rename[0])
 			ap1 = os.path.abspath(args.rename[1])
 			oslides = []
 			for m in medias.values():
-				if m.isExternal
+				if m.isExternal:
 					if m.extpath == ap0:
 						print "renaming real file",args.rename[0],args.rename[1]
 						os.rename(ap0,ap1)
